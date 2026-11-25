@@ -1,0 +1,102 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: sd-delivery-risk-class01
+  annotations:
+    scenarios.ai.sap.com/name: "SAP SD Delivery Risk"
+    scenarios.ai.sap.com/description: "Sales order delivery risk workshop (live S/4HANA OData)"
+    executables.ai.sap.com/name: "Classify Delivery Risk"
+    executables.ai.sap.com/description: "Reads open SAP SD items and stock live from S/4HANA and classifies risk"
+  labels:
+    scenarios.ai.sap.com/id: "sd-delivery-risk-class01"
+    ai.sap.com/version: "1.2"
+spec:
+  entrypoint: risk-pipeline
+  templates:
+    - name: risk-pipeline
+      steps:
+        - - name: classify-orders
+            template: risk-classifier
+
+    - name: risk-classifier
+      container:
+        image: docker.io/python:3.11-slim
+        command: ["python3", "-c"]
+        env:
+          # From an AI Core generic secret named "s4-backend-credentials"
+          # keys: host, user, password   (host e.g. http://mtsapserver11.themdlabs.com:8000)
+          - name: S4_HOST
+            valueFrom: {secretKeyRef: {name: s4-backend-credentials, key: host}}
+          - name: S4_USER
+            valueFrom: {secretKeyRef: {name: s4-backend-credentials, key: user}}
+          - name: S4_PASSWORD
+            valueFrom: {secretKeyRef: {name: s4-backend-credentials, key: password}}
+          - name: S4_CLIENT
+            value: "100"
+          - name: S4_PLANT
+            value: "1710"
+          - name: MAX_ITEMS
+            value: "50"
+        args:
+          - |
+            import os, re, json, base64, urllib.request, urllib.parse
+            from datetime import date, datetime, timedelta
+
+            HOST, CLIENT, PLANT = os.environ["S4_HOST"].rstrip("/"), os.environ["S4_CLIENT"], os.environ["S4_PLANT"]
+            AUTH = "Basic " + base64.b64encode(
+                f"{os.environ['S4_USER']}:{os.environ['S4_PASSWORD']}".encode()).decode()
+
+            def odata(service, entity, params):
+                params = {**params, "$format": "json", "sap-client": CLIENT}
+                url = f"{HOST}/sap/opu/odata/sap/{service}/{entity}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+                req = urllib.request.Request(url, headers={"Authorization": AUTH, "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.load(r)["d"]["results"]
+
+            def odata_date(v):
+                # OData V2 format: /Date(1509926400000)/
+                if not v:
+                    return None
+                ms = int(re.search(r"\d+", v).group())
+                return (datetime(1970, 1, 1) + timedelta(milliseconds=ms)).date()
+
+            # 1. Open sales order items (not completely delivered) with their schedule lines
+            items = odata("API_SALES_ORDER_SRV", "A_SalesOrderItem", {
+                "$filter": f"DeliveryStatus ne 'C' and ProductionPlant eq '{PLANT}'",
+                "$select": "SalesOrder,SalesOrderItem,Material,RequestedQuantity",
+                "$expand": "to_ScheduleLine",
+                "$top": os.environ["MAX_ITEMS"],
+            })
+
+            # 2. Unrestricted-use stock (type 01) per material in the plant
+            stock = {}
+            for m in sorted({i["Material"] for i in items}):
+                rows = odata("API_MATERIAL_STOCK_SRV", "A_MatlStkInAcctMod", {
+                    "$filter": f"Plant eq '{PLANT}' and Material eq '{m}' and InventoryStockType eq '01'",
+                    "$select": "Material,MatlWrhsStkQtyInMatlBaseUnit",
+                })
+                stock[m] = sum(float(r["MatlWrhsStkQtyInMatlBaseUnit"]) for r in rows)
+
+            # 3. Classify
+            today = date.today()
+            print("SAP SD DELIVERY RISK REPORT (live S/4HANA)")
+            print(f"Source: {HOST} client {CLIENT} plant {PLANT}")
+            print(f"Run date: {today}")
+            print("-" * 60)
+
+            for i in items:
+                qty = float(i["RequestedQuantity"])
+                avail = stock.get(i["Material"], 0.0)
+                dates = [odata_date(s.get("RequestedDeliveryDate")) for s in i["to_ScheduleLine"]["results"]]
+                requested = min([d for d in dates if d], default=None)
+                days_overdue = (today - requested).days if requested else 0
+
+                if avail < qty:
+                    risk, reason = "HIGH", "stock below ordered quantity"
+                elif days_overdue > 0:
+                    risk, reason = "MEDIUM", f"stock OK but {days_overdue} days past requested date"
+                else:
+                    risk, reason = "LOW", "stock OK and not yet due"
+
+                print(f"Sales Order {i['SalesOrder']}/{i['SalesOrderItem']} | {i['Material']} | "
+                      f"qty {qty:g} / stock {avail:g} | {risk} RISK ({reason})")
