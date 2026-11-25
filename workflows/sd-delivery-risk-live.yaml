@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: sd-delivery-risk-class01
+  name: sd-delivery-risk-live01
   annotations:
     scenarios.ai.sap.com/name: "SAP SD Delivery Risk"
     scenarios.ai.sap.com/description: "Sales order delivery risk workshop (live S/4HANA OData)"
     executables.ai.sap.com/name: "Classify Delivery Risk"
     executables.ai.sap.com/description: "Reads open SAP SD items and stock live from S/4HANA and classifies risk"
   labels:
-    scenarios.ai.sap.com/id: "sd-delivery-risk-class01"
+    scenarios.ai.sap.com/id: "sd-delivery-risk-live01"
     ai.sap.com/version: "1.2"
 spec:
   entrypoint: risk-pipeline
