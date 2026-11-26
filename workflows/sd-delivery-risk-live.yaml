@@ -63,7 +63,7 @@ spec:
             # 1. Open sales order items (not completely delivered) with their schedule lines
             items = odata("API_SALES_ORDER_SRV", "A_SalesOrderItem", {
                 "$filter": f"DeliveryStatus ne 'C' and ProductionPlant eq '{PLANT}'",
-                "$select": "SalesOrder,SalesOrderItem,Material,RequestedQuantity",
+                "$select": "SalesOrder,SalesOrderItem,Material,RequestedQuantity,to_ScheduleLine",
                 "$expand": "to_ScheduleLine",
                 "$top": os.environ["MAX_ITEMS"],
             })
@@ -87,7 +87,7 @@ spec:
             for i in items:
                 qty = float(i["RequestedQuantity"])
                 avail = stock.get(i["Material"], 0.0)
-                dates = [odata_date(s.get("RequestedDeliveryDate")) for s in i["to_ScheduleLine"]["results"]]
+               dates = [odata_date(s.get("RequestedDeliveryDate")) for s in i.get("to_ScheduleLine", {}).get("results", [])]
                 requested = min([d for d in dates if d], default=None)
                 days_overdue = (today - requested).days if requested else 0
 
