@@ -3,7 +3,7 @@ kind: WorkflowTemplate
 metadata:
   name: sd-delivery-risk-live01
   annotations:
-    scenarios.ai.sap.com/name: "SAP SD Delivery Risk1"
+    scenarios.ai.sap.com/name: "SAP SD Delivery Risk"
     scenarios.ai.sap.com/description: "Sales order delivery risk workshop (live S/4HANA OData)"
     executables.ai.sap.com/name: "Classify Delivery Risk"
     executables.ai.sap.com/description: "Reads open SAP SD items and stock live from S/4HANA and classifies risk"
@@ -63,10 +63,20 @@ spec:
             # 1. Open sales order items (not completely delivered) with their schedule lines
             items = odata("API_SALES_ORDER_SRV", "A_SalesOrderItem", {
                 "$filter": f"DeliveryStatus ne 'C' and ProductionPlant eq '{PLANT}'",
-                "$select": "SalesOrder,SalesOrderItem,Material,RequestedQuantity,to_ScheduleLine",
-                "$expand": "to_ScheduleLine",
+                "$select": "SalesOrder,SalesOrderItem,Material,RequestedQuantity",
                 "$top": os.environ["MAX_ITEMS"],
             })
+
+            # 1b. Requested delivery date per item (separate call, no $expand)
+            first_date = {}
+            for i in items:
+                key = (i["SalesOrder"], i["SalesOrderItem"])
+                sl = odata("API_SALES_ORDER_SRV", "A_SalesOrderScheduleLine", {
+                    "$filter": f"SalesOrder eq '{key[0]}' and SalesOrderItem eq '{key[1]}'",
+                    "$select": "RequestedDeliveryDate",
+                })
+                ds = [odata_date(s.get("RequestedDeliveryDate")) for s in sl]
+                first_date[key] = min([d for d in ds if d], default=None)
 
             # 2. Unrestricted-use stock (type 01) per material in the plant
             stock = {}
@@ -87,8 +97,7 @@ spec:
             for i in items:
                 qty = float(i["RequestedQuantity"])
                 avail = stock.get(i["Material"], 0.0)
-               dates = [odata_date(s.get("RequestedDeliveryDate")) for s in i.get("to_ScheduleLine", {}).get("results", [])]
-                requested = min([d for d in dates if d], default=None)
+                requested = first_date.get((i["SalesOrder"], i["SalesOrderItem"]))
                 days_overdue = (today - requested).days if requested else 0
 
                 if avail < qty:
